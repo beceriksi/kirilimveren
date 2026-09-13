@@ -19,8 +19,8 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Telegram mesaj hatası: {e}")
 
-# 1. Pivot Tespiti
-def get_pivots(df, pivot_len=4):
+# 1. Pivot Tespiti (Gürültüyü önlemek için pivot_len=8 yapıldı - Pine Script ile birebir)
+def get_pivots(df, pivot_len=8):
     highs = df['high'].values
     lows = df['low'].values
     
@@ -39,7 +39,7 @@ def get_pivots(df, pivot_len=4):
             pl_prices.append(lows[i])
             pl_bars.append(i)
             
-    return ph_prices[-10:], ph_bars[-10:], pl_prices[-10:], pl_bars[-10:]
+    return ph_prices[-12:], ph_bars[-12:], pl_prices[-12:], pl_bars[-12:]
 
 # 2. Çizgi İhlal Kontrolü
 def is_line_valid(df, x1, y1, x2, y2, side, tol):
@@ -50,29 +50,34 @@ def is_line_valid(df, x1, y1, x2, y2, side, tol):
     
     for b in range(x1 + 1, x2):
         line_val = intercept + slope * b
-        if side == 1:
+        if side == 1: # Direnç
             if highs[b] > line_val + tol:
                 return False
-        else:
+        else: # Destek
             if lows[b] < line_val - tol:
                 return False
     return True
 
-# 3. En Uygun Trend Çizgisini Bulma
+# 3. Ana Trend Çizgisini Bulma (Minimum 15 Bar Mesafe Şartı Eklenmiştir)
 def find_best_trendline(df, prices, bars, side, tol):
     n = len(prices)
     if n < 2:
         return None, None
     
+    # En anlamlı/geniş trend çizgisini bulmak için geriye doğru tara
     for i in range(n - 1, 0, -1):
         for j in range(i - 1, -1, -1):
             x1, y1 = bars[j], prices[j]
             x2, y2 = bars[i], prices[i]
             
-            slope = (y2 - y1) / (x2 - x1)
-            if side == 1 and slope >= 0:
+            # Mikro önemsiz çizgileri engelle: İki tepe/dip arasında en az 15 mum olmalı
+            if (x2 - x1) < 15:
                 continue
-            if side == -1 and slope <= 0:
+                
+            slope = (y2 - y1) / (x2 - x1)
+            if side == 1 and slope >= 0: # Düşen trend aşağı meyil olmalı
+                continue
+            if side == -1 and slope <= 0: # Yükselen trend yukarı meyil olmalı
                 continue
 
             if is_line_valid(df, x1, y1, x2, y2, side, tol):
@@ -84,10 +89,10 @@ def find_best_trendline(df, prices, bars, side, tol):
 # 4. Kırılım ve Hacim Analizi
 def check_breakout(exchange, symbol, timeframe='1h'):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=200)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=300)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # ATR Toleransı
+        # ATR Toleransı (Fitil toleransı)
         df['tr'] = np.maximum(
             df['high'] - df['low'],
             np.maximum(
@@ -96,7 +101,7 @@ def check_breakout(exchange, symbol, timeframe='1h'):
             )
         )
         atr = df['tr'].rolling(14).mean().iloc[-1]
-        tol = 0.1 * atr
+        tol = 0.15 * atr # Orijinal gösterge toleransı
         
         # Hacim Analizi
         df['vol_ma'] = df['volume'].shift(1).rolling(20).mean()
@@ -105,7 +110,7 @@ def check_breakout(exchange, symbol, timeframe='1h'):
         vol_ratio = vol_curr / vol_ma_val if vol_ma_val > 0 else 1.0
         is_high_volume = vol_ratio >= 1.5
         
-        ph_prices, ph_bars, pl_prices, pl_bars = get_pivots(df, pivot_len=4)
+        ph_prices, ph_bars, pl_prices, pl_bars = get_pivots(df, pivot_len=8)
         
         curr_bar = len(df) - 1
         prev_bar = len(df) - 2
@@ -160,11 +165,10 @@ if __name__ == "__main__":
     exchange = ccxt.okx()
     tickers = exchange.fetch_tickers()
     
-    # OKX Spot USDT çiftlerini filtrele
     usdt_pairs = [symbol for symbol in tickers if symbol.endswith('/USDT') and 'SWAP' not in symbol]
     sorted_pairs = sorted(usdt_pairs, key=lambda x: tickers[x]['quoteVolume'] if tickers[x]['quoteVolume'] else 0, reverse=True)[:60]
     
-    print("OKX üzerinden tarama başlatıldı...")
+    print("OKX üzerinde stabil tarama başlatıldı...")
     for symbol in sorted_pairs:
         check_breakout(exchange, symbol, timeframe='1h')
         check_breakout(exchange, symbol, timeframe='4h')
