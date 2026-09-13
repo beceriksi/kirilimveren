@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import requests
 
-# Telegram Bilgileri (GitHub Secrets'tan kopyalanır)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -19,7 +18,7 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Telegram mesaj hatası: {e}")
 
-# 1. Pivot Tespiti (Gürültüyü önlemek için pivot_len=8 yapıldı - Pine Script ile birebir)
+# 1. Pivot Tespiti
 def get_pivots(df, pivot_len=8):
     highs = df['high'].values
     lows = df['low'].values
@@ -50,34 +49,32 @@ def is_line_valid(df, x1, y1, x2, y2, side, tol):
     
     for b in range(x1 + 1, x2):
         line_val = intercept + slope * b
-        if side == 1: # Direnç
+        if side == 1:
             if highs[b] > line_val + tol:
                 return False
-        else: # Destek
+        else:
             if lows[b] < line_val - tol:
                 return False
     return True
 
-# 3. Ana Trend Çizgisini Bulma (Minimum 15 Bar Mesafe Şartı Eklenmiştir)
+# 3. Ana Trend Çizgisini Bulma
 def find_best_trendline(df, prices, bars, side, tol):
     n = len(prices)
     if n < 2:
         return None, None
     
-    # En anlamlı/geniş trend çizgisini bulmak için geriye doğru tara
     for i in range(n - 1, 0, -1):
         for j in range(i - 1, -1, -1):
             x1, y1 = bars[j], prices[j]
             x2, y2 = bars[i], prices[i]
             
-            # Mikro önemsiz çizgileri engelle: İki tepe/dip arasında en az 15 mum olmalı
-            if (x2 - x1) < 15:
+            if (x2 - x1) < 15: # En az 15 mum mesafe şartı
                 continue
                 
             slope = (y2 - y1) / (x2 - x1)
-            if side == 1 and slope >= 0: # Düşen trend aşağı meyil olmalı
+            if side == 1 and slope >= 0:
                 continue
-            if side == -1 and slope <= 0: # Yükselen trend yukarı meyil olmalı
+            if side == -1 and slope <= 0:
                 continue
 
             if is_line_valid(df, x1, y1, x2, y2, side, tol):
@@ -86,13 +83,12 @@ def find_best_trendline(df, prices, bars, side, tol):
                 
     return None, None
 
-# 4. Kırılım ve Hacim Analizi
+# 4. Kırılım Analizi
 def check_breakout(exchange, symbol, timeframe='1h'):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=300)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # ATR Toleransı (Fitil toleransı)
         df['tr'] = np.maximum(
             df['high'] - df['low'],
             np.maximum(
@@ -101,9 +97,8 @@ def check_breakout(exchange, symbol, timeframe='1h'):
             )
         )
         atr = df['tr'].rolling(14).mean().iloc[-1]
-        tol = 0.15 * atr # Orijinal gösterge toleransı
+        tol = 0.15 * atr
         
-        # Hacim Analizi
         df['vol_ma'] = df['volume'].shift(1).rolling(20).mean()
         vol_curr = df['volume'].iloc[-1]
         vol_ma_val = df['vol_ma'].iloc[-1]
@@ -118,7 +113,10 @@ def check_breakout(exchange, symbol, timeframe='1h'):
         close_curr = df['close'].iloc[-1]
         close_prev = df['close'].iloc[-2]
         
-        # DİRENÇ KIRILIMI
+        coin_name = symbol.split('/')[0]
+        vol_str = f"⚡ *{round(vol_ratio, 1)}x Hacim*" if is_high_volume else f"📊 {round(vol_ratio, 1)}x Hacim"
+
+        # DİRENÇ KIRILIMI (YUKARI)
         if len(ph_prices) >= 2:
             res_slope, res_intercept = find_best_trendline(df, ph_prices, ph_bars, 1, tol)
             if res_slope is not None:
@@ -126,19 +124,16 @@ def check_breakout(exchange, symbol, timeframe='1h'):
                 res_val_prev = res_intercept + res_slope * prev_bar
                 
                 if close_prev <= res_val_prev and close_curr > res_val_curr:
-                    header = "🔥 *YÜKSEK HACİMLİ DİRENÇ KIRILIMI!*" if is_high_volume else "🚀 *DİRENÇ KIRILDI (YUKARI)*"
-                    vol_status = f"⚡ *Hacim Durumu:* Ortalama Hacmin *{round(vol_ratio, 2)} Katı!*" if is_high_volume else f"📊 *Hacim Oranı:* {round(vol_ratio, 2)}x (Normal)"
-                    
-                    send_telegram_message(
-                        f"{header}\n\n"
-                        f"• *Coin:* #{symbol.split('/')[0]}\n"
-                        f"• *Periyot:* {timeframe}\n"
-                        f"• *Kapanış Fiyatı:* `{close_curr}`\n"
-                        f"• *Trend Seviyesi:* `{round(res_val_curr, 4)}`\n"
-                        f"• {vol_status}"
-                    )
+                    return {
+                        'coin': coin_name,
+                        'type': 'UP',
+                        'price': close_curr,
+                        'level': round(res_val_curr, 4),
+                        'vol': vol_str,
+                        'high_vol': is_high_volume
+                    }
 
-        # DESTEK KIRILIMI
+        # DESTEK KIRILIMI (AŞAĞI)
         if len(pl_prices) >= 2:
             sup_slope, sup_intercept = find_best_trendline(df, pl_prices, pl_bars, -1, tol)
             if sup_slope is not None:
@@ -146,20 +141,18 @@ def check_breakout(exchange, symbol, timeframe='1h'):
                 sup_val_prev = sup_intercept + sup_slope * prev_bar
                 
                 if close_prev >= sup_val_prev and close_curr < sup_val_curr:
-                    header = "💥 *HACİMLİ DESTEK KIRILIMI (DÜŞÜŞ)!*" if is_high_volume else "📉 *DESTEK KIRILDI (AŞAĞI)*"
-                    vol_status = f"⚡ *Satış Hacmi:* Ortalama Hacmin *{round(vol_ratio, 2)} Katı!*" if is_high_volume else f"📊 *Hacim Oranı:* {round(vol_ratio, 2)}x (Normal)"
-                    
-                    send_telegram_message(
-                        f"{header}\n\n"
-                        f"• *Coin:* #{symbol.split('/')[0]}\n"
-                        f"• *Periyot:* {timeframe}\n"
-                        f"• *Kapanış Fiyatı:* `{close_curr}`\n"
-                        f"• *Trend Seviyesi:* `{round(sup_val_curr, 4)}`\n"
-                        f"• {vol_status}"
-                    )
+                    return {
+                        'coin': coin_name,
+                        'type': 'DOWN',
+                        'price': close_curr,
+                        'level': round(sup_val_curr, 4),
+                        'vol': vol_str,
+                        'high_vol': is_high_volume
+                    }
 
     except Exception:
         pass
+    return None
 
 if __name__ == "__main__":
     exchange = ccxt.okx()
@@ -168,8 +161,61 @@ if __name__ == "__main__":
     usdt_pairs = [symbol for symbol in tickers if symbol.endswith('/USDT') and 'SWAP' not in symbol]
     sorted_pairs = sorted(usdt_pairs, key=lambda x: tickers[x]['quoteVolume'] if tickers[x]['quoteVolume'] else 0, reverse=True)[:60]
     
-    print("OKX üzerinde stabil tarama başlatıldı...")
+    print("Tarama başlatıldı...")
+    
+    results = {
+        '1h': {'UP': [], 'DOWN': []},
+        '4h': {'UP': [], 'DOWN': []}
+    }
+    
     for symbol in sorted_pairs:
-        check_breakout(exchange, symbol, timeframe='1h')
-        check_breakout(exchange, symbol, timeframe='4h')
-    print("Tarama bitti.")
+        # 1 Saatlik Tarama
+        res_1h = check_breakout(exchange, symbol, timeframe='1h')
+        if res_1h:
+            results['1h'][res_1h['type']].append(res_1h)
+            
+        # 4 Saatlik Tarama
+        res_4h = check_breakout(exchange, symbol, timeframe='4h')
+        if res_4h:
+            results['4h'][res_4h['type']].append(res_4h)
+
+    # TELEGRAM RAPORUNU OLUŞTUR
+    total_signals = len(results['1h']['UP']) + len(results['1h']['DOWN']) + len(results['4h']['UP']) + len(results['4h']['DOWN'])
+    
+    if total_signals > 0:
+        msg = "🔍 *PIYASA KIRILIM RAPORU*\n"
+        msg += "═══════════════════\n\n"
+        
+        # 1 SAATLİK SİNYALLER
+        if results['1h']['UP'] or results['1h']['DOWN']:
+            msg += "⏱ *[ 1 SAATLİK PERİYOT ]*\n"
+            if results['1h']['UP']:
+                msg += "🟢 *Yukarı Kırılımlar (Direnç):*\n"
+                for item in results['1h']['UP']:
+                    msg += f"  • *#{item['coin']}* | Fiyat: `{item['price']}` | ({item['vol']})\n"
+            if results['1h']['DOWN']:
+                msg += "🔴 *Aşağı Kırılımlar (Destek):*\n"
+                for item in results['1h']['DOWN']:
+                    msg += f"  • *#{item['coin']}* | Fiyat: `{item['price']}` | ({item['vol']})\n"
+            msg += "\n"
+
+        # 4 SAATLİK SİNYALLER
+        if results['4h']['UP'] or results['4h']['DOWN']:
+            msg += "⏱ *[ 4 SAATLİK PERİYOT ]*\n"
+            if results['4h']['UP']:
+                msg += "🟢 *Yukarı Kırılımlar (Direnç):*\n"
+                for item in results['4h']['UP']:
+                    msg += f"  • *#{item['coin']}* | Fiyat: `{item['price']}` | ({item['vol']})\n"
+            if results['4h']['DOWN']:
+                msg += "🔴 *Aşağı Kırılımlar (Destek):*\n"
+                for item in results['4h']['DOWN']:
+                    msg += f"  • *#{item['coin']}* | Fiyat: `{item['price']}` | ({item['vol']})\n"
+            msg += "\n"
+            
+        msg += "═══════════════════\n"
+        msg += "🤖 *Otomatik Tarama Tamamlandı.*"
+        
+        send_telegram_message(msg)
+        print("Telegram mesajı gönderildi.")
+    else:
+        print("Kırılım tespit edilmedi, mesaj atılmadı.")
